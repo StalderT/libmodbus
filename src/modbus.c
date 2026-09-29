@@ -781,7 +781,11 @@ static int response_exception(modbus_t *ctx,
 
     /* Flush if required */
     if (to_flush) {
-        _sleep_response_timeout(ctx);
+        /* Over TCP, the MBAP header gives the request length and the whole
+           request has already been read, so there is nothing to wait for. */
+        if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_RTU) {
+            _sleep_response_timeout(ctx);
+        }
         modbus_flush(ctx);
     }
 

@@ -896,8 +896,8 @@ int test_server(modbus_t *ctx, int use_backend)
     uint32_t old_response_to_usec;
 
     /* This requests can generate flushes server side so we need a higher
-     * response timeout than the server. The server uses the defined response
-     * timeout to sleep before flushing.
+     * response timeout than the server. Over RTU, the server uses the defined
+     * response timeout to sleep before flushing.
      * The old timeouts are restored at the end.
      */
     modbus_get_response_timeout(ctx, &old_response_to_sec, &old_response_to_usec);
@@ -990,7 +990,11 @@ int test_server(modbus_t *ctx, int use_backend)
     if (rc == -1)
         goto close;
 
-    /* Test invalid function code */
+    /* Test invalid function code. Over TCP the server must answer without
+       waiting for its response timeout, so a shorter one is enough here. */
+    if (use_backend != RTU) {
+        modbus_set_response_timeout(ctx, 0, 100000);
+    }
     modbus_send_raw_request(
         ctx, invalid_fc_raw_req, INVALID_FC_REQ_LEN * sizeof(uint8_t));
     rc = modbus_receive_confirmation(ctx, rsp);
