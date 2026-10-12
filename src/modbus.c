@@ -350,6 +350,50 @@ compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
     return length;
 }
 
+/* Over TCP a response is read up to its MBAP length. For a function code known
+   to libmodbus, check that this is the length its content requires, so the
+   callers can rely on it as they do on the other backends (eg. the data of a
+   report slave ID response is copied up to its byte count). The response of
+   another function code is left as read. */
+static int check_tcp_confirmation_length(modbus_t *ctx, uint8_t *msg, int msg_length)
+{
+    const int offset = ctx->backend->header_length;
+    const int function = msg[offset];
+    int length;
+
+    if (function < 0x80) {
+        switch (function) {
+        case MODBUS_FC_READ_COILS:
+        case MODBUS_FC_READ_DISCRETE_INPUTS:
+        case MODBUS_FC_READ_HOLDING_REGISTERS:
+        case MODBUS_FC_READ_INPUT_REGISTERS:
+        case MODBUS_FC_WRITE_SINGLE_COIL:
+        case MODBUS_FC_WRITE_SINGLE_REGISTER:
+        case MODBUS_FC_READ_EXCEPTION_STATUS:
+        case MODBUS_FC_WRITE_MULTIPLE_COILS:
+        case MODBUS_FC_WRITE_MULTIPLE_REGISTERS:
+        case MODBUS_FC_REPORT_SLAVE_ID:
+        case MODBUS_FC_MASK_WRITE_REGISTER:
+        case MODBUS_FC_WRITE_AND_READ_REGISTERS:
+            break;
+        default:
+            return 0;
+        }
+    }
+
+    length = offset + 1 + compute_meta_length_after_function(function, MSG_CONFIRMATION);
+    if (msg_length >= length) {
+        length += compute_data_length_after_meta(ctx, msg, MSG_CONFIRMATION);
+    }
+    if (msg_length != length) {
+        errno = EMBBADDATA;
+        _error_print(ctx, "MBAP length not matching the response");
+        return -1;
+    }
+
+    return 0;
+}
+
 /* Waits a response from a modbus server or a request from a modbus client.
    This function blocks if there is no replies (3 timeouts).
 
@@ -506,14 +550,14 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
         if (length_to_read == 0) {
             switch (step) {
             case _STEP_FUNCTION:
-                if (msg_type == MSG_INDICATION &&
-                    ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_TCP) {
-                    /* Over TCP, a request ends where the length field of the MBAP
+                if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_TCP) {
+                    /* Over TCP, a message ends where the length field of the MBAP
                        header (bytes 4 and 5) says, whatever its function code. It
                        counts the unit identifier and the function code, already
-                       read. Reading exactly that much leaves the next request
+                       read. Reading exactly that much leaves the next message
                        intact in the socket, so it is neither lost nor parsed from
-                       its middle. */
+                       its middle, and octets the peer adds can't be taken as the
+                       next message. */
                     const int remaining = ((msg[4] << 8) + msg[5]) - 2;
 
                     if (remaining < 0 ||
@@ -562,6 +606,12 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
 
     if (ctx->debug)
         printf("\n");
+
+    if (msg_type == MSG_CONFIRMATION &&
+        ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_TCP &&
+        check_tcp_confirmation_length(ctx, msg, msg_length) == -1) {
+        return -1;
+    }
 
     return ctx->backend->check_integrity(ctx, msg, msg_length);
 }

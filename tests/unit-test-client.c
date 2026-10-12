@@ -784,6 +784,19 @@ int main(int argc, char *argv[])
     ASSERT_TRUE(rc == -1 && errno == EMBBADDATA, "");
     free(tab_rp_registers_bad);
 
+    if (use_backend != RTU) {
+        /* The octets the server adds after its response must not be read as
+           the response to the next request */
+        rc = modbus_read_registers(
+            ctx, UT_REGISTERS_ADDRESS_TRAILING_OCTETS, 1, tab_rp_registers);
+        printf("* response with trailing octets: ");
+        ASSERT_TRUE(rc == -1 && errno == EMBBADDATA, "FAILED (%d)\n", rc);
+
+        rc = modbus_read_registers(ctx, UT_REGISTERS_ADDRESS, 1, tab_rp_registers);
+        printf("* next response: ");
+        ASSERT_TRUE(rc == 1, "FAILED (%d)\n", rc);
+    }
+
     /** MANUAL EXCEPTION **/
     printf("\nTEST MANUAL EXCEPTION:\n");
     rc = modbus_read_registers(
