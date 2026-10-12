@@ -506,6 +506,26 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
         if (length_to_read == 0) {
             switch (step) {
             case _STEP_FUNCTION:
+                if (msg_type == MSG_INDICATION &&
+                    ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_TCP) {
+                    /* Over TCP, a request ends where the length field of the MBAP
+                       header (bytes 4 and 5) says, whatever its function code. It
+                       counts the unit identifier and the function code, already
+                       read. Reading exactly that much leaves the next request
+                       intact in the socket, so it is neither lost nor parsed from
+                       its middle. */
+                    const int remaining = ((msg[4] << 8) + msg[5]) - 2;
+
+                    if (remaining < 0 ||
+                        msg_length + remaining > (int) ctx->backend->max_adu_length) {
+                        errno = EMBBADDATA;
+                        _error_print(ctx, "invalid MBAP length");
+                        return -1;
+                    }
+                    length_to_read = remaining;
+                    step = _STEP_DATA;
+                    break;
+                }
                 /* Function code position */
                 length_to_read = compute_meta_length_after_function(
                     msg[ctx->backend->header_length], msg_type);
@@ -779,13 +799,11 @@ static int response_exception(modbus_t *ctx,
         va_end(ap);
     }
 
-    /* Flush if required */
-    if (to_flush) {
-        /* Over TCP, the MBAP header gives the request length and the whole
-           request has already been read, so there is nothing to wait for. */
-        if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_RTU) {
-            _sleep_response_timeout(ctx);
-        }
+    /* Flush if required. Over TCP there is nothing to discard: the request has
+       been read up to the length given by its MBAP header, and what is left in
+       the socket belongs to the next request. */
+    if (to_flush && ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_RTU) {
+        _sleep_response_timeout(ctx);
         modbus_flush(ctx);
     }
 
@@ -851,9 +869,10 @@ int modbus_reply(modbus_t *ctx,
 
     /* Ensure the request is long enough to contain the meta fields (address,
        quantity, byte count...) and the declared data read by the handlers
-       below. On the canonical modbus_receive() path the framing layer already
-       guarantees a complete PDU; this check defends direct callers that pass a
-       truncated or untrusted request to modbus_reply(). */
+       below. Over TCP, modbus_receive() frames the request by its MBAP length,
+       which can be shorter than its function code requires; this check also
+       defends direct callers that pass a truncated or untrusted request to
+       modbus_reply(). */
     meta_length = compute_meta_length_after_function(function, MSG_INDICATION);
     data_length = 0;
     if (req_length >= (int) (offset + 1 + meta_length)) {

@@ -11,6 +11,19 @@
 #include <string.h>
 #include <unistd.h>
 
+// clang-format off
+#ifdef _WIN32
+# include <winsock2.h>
+#else
+# include <sys/socket.h>
+#endif
+
+/* For MinGW */
+#ifndef MSG_NOSIGNAL
+# define MSG_NOSIGNAL 0
+#endif
+// clang-format on
+
 #include "unit-test.h"
 
 const int EXCEPTION_RC = 2;
@@ -1002,6 +1015,76 @@ int test_server(modbus_t *ctx, int use_backend)
     ASSERT_TRUE(rc == (backend_length + EXCEPTION_RC) &&
                     rsp[backend_offset] == (0x80 + INVALID_FC),
                 "")
+
+    if (use_backend != RTU) {
+        /* An unknown function code whose MBAP header announces 4 more octets,
+           immediately followed by a valid read. The server must answer both, in
+           order, whether the two requests arrive together or the first one is
+           cut after its function code. */
+        uint8_t pipelined_req[] = {/* TID 9, unknown function code */
+                                   0x00,
+                                   0x09,
+                                   0x00,
+                                   0x00,
+                                   0x00,
+                                   0x06,
+                                   slave,
+                                   INVALID_FC,
+                                   0x00,
+                                   0x00,
+                                   0x00,
+                                   0x02,
+                                   /* TID 10, read one register */
+                                   0x00,
+                                   0x0A,
+                                   0x00,
+                                   0x00,
+                                   0x00,
+                                   0x06,
+                                   slave,
+                                   MODBUS_FC_READ_HOLDING_REGISTERS,
+                                   UT_REGISTERS_ADDRESS >> 8,
+                                   UT_REGISTERS_ADDRESS & 0xFF,
+                                   0x00,
+                                   0x01};
+        /* MBAP header and function code of the first request */
+        const int cut = 8;
+        int s = modbus_get_socket(ctx);
+        int j;
+
+        for (j = 0; j < 2; j++) {
+            if (j == 0) {
+                printf("* pipelined requests after an unknown function code: ");
+                rc = send(
+                    s, (const char *) pipelined_req, sizeof(pipelined_req), MSG_NOSIGNAL);
+            } else {
+                printf("* unknown function code cut after the function code: ");
+                rc = send(s, (const char *) pipelined_req, cut, MSG_NOSIGNAL);
+                if (rc == cut) {
+                    usleep(50000);
+                    rc = send(s,
+                              (const char *) pipelined_req + cut,
+                              sizeof(pipelined_req) - cut,
+                              MSG_NOSIGNAL);
+                }
+            }
+            ASSERT_TRUE(rc > 0, "FAILED (send %d)\n", rc);
+
+            rc = modbus_receive_confirmation(ctx, rsp);
+            printf("  exception to TID 9: ");
+            ASSERT_TRUE(rc == (backend_length + EXCEPTION_RC) && rsp[1] == 0x09 &&
+                            rsp[backend_offset] == (0x80 + INVALID_FC),
+                        "FAILED (%d)\n",
+                        rc);
+
+            rc = modbus_receive_confirmation(ctx, rsp);
+            printf("  response to TID 10: ");
+            ASSERT_TRUE(rc == (backend_length + 4) && rsp[1] == 0x0A &&
+                            rsp[backend_offset] == MODBUS_FC_READ_HOLDING_REGISTERS,
+                        "FAILED (%d)\n",
+                        rc);
+        }
+    }
 
     modbus_set_response_timeout(ctx, old_response_to_sec, old_response_to_usec);
     return 0;
